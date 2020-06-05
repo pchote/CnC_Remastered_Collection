@@ -821,6 +821,10 @@ class BuildingTypeClass : public TechnoTypeClass {
 		virtual void  Display(int x, int y, WindowNumberType window, HousesType house) const;
 		#endif
 
+		/*
+		** pchote - "Modern Wall Building" mod.
+		*/
+		virtual OverlayType Overlay_Type(void) const;
 
 	private:
 

@@ -812,6 +812,11 @@ class BuildingTypeClass : public TechnoTypeClass {
 		*/
 		static void const * WarFactoryOverlay;
 
+		/*
+		** pchote - "Modern Wall Building" mod.
+		*/
+		virtual OverlayType Overlay_Type(void) const;
+
 	private:
 
 		/*

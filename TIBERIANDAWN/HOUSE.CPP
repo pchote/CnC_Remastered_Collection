@@ -105,6 +105,10 @@
 #include "SidebarGlyphx.h"
 #include "defines.h"
 
+/*
+** pchote - "Modern Wall Building" mod.
+*/
+extern bool DLL_Export_Get_Input_Key_State(KeyNumType key);
 
 /***********************************************************************************************
  * HouseClass::Validate -- validates house pointer															  *
@@ -2891,6 +2895,15 @@ bool HouseClass::Place_Object(RTTIType type, CELL cell)
 			if (tech) {
 				TechnoClass * builder = tech->Who_Can_Build_Me(false, false);
 				if (builder) {
+					/*
+					** If tech is a wall it will be replaced with an overlay and freed by Unlimbo.
+					** We must fetch the overlay type now, while we still can.
+					** pchote - "Modern Wall Building" mod.
+					*/
+					OverlayType otype = OVERLAY_NONE;
+					HousesType house = tech->House->Class->House;
+					if (tech->What_Am_I() == RTTI_BUILDING)
+						otype = ((BuildingClass*)tech)->Class->Overlay_Type();
 
 					/*
 					**	Ensures that the proximity check is performed even when the building is
@@ -2901,6 +2914,19 @@ bool HouseClass::Place_Object(RTTIType type, CELL cell)
 						if (tech->Unlimbo(Cell_Coord(cell))) {
 							factory->Completed();
 							Abandon_Production(type);
+
+							/*
+							** Add the line-built wall segments to the map.
+							** pchote - "Modern Wall Building" mod.
+							*/
+							bool ctrldown = DLL_Export_Get_Input_Key_State(KN_LCTRL);
+							if (otype != OVERLAY_NONE && !ctrldown)
+							{
+								OverlayTypeClass const& wall = OverlayTypeClass::As_Reference(otype);
+								DirType cardinal[4] = { DIR_N, DIR_E, DIR_S, DIR_W };
+								for (int i = 0; i < 4; i++)
+									Extend_Wall(wall, house, cell, cardinal[i], 5);
+							}
 
 							if (PlayerPtr == this) {
 								Sound_Effect(VOC_SLAM);
@@ -2929,6 +2955,67 @@ bool HouseClass::Place_Object(RTTIType type, CELL cell)
 	}
 
 	return(true);
+}
+
+
+/***********************************************************************************************
+ * HouseClass::Extend_Wall -- Attempt to extend a line-built wall                              *
+ *                                                                                             *
+ *    This routine implements the wall placement behaviour from OpenRA.                        *
+ *    Step outwards in a specified direction up to a specified number of cells.                *
+ *    If we encounter an overlay of the specified wall type, break and create wall overlay     *
+ *    in the intermediate cells. If a matching wall is not found, or we encounter an           *
+ *    obstacle, return without doing anything.                                                 *
+ *                                                                                             *
+ * INPUT:   wall     -- The overlay type that is being placed down on the map.                 *
+ *                                                                                             *
+ *          house    -- The owner for newly placed wall segments                               *
+ *                                                                                             *
+ *          cell     -- The reference cell to check next to                                    *
+ *                                                                                             *
+ *          dir      -- The direction to step from the reference cell                          *
+ *                                                                                             *
+ *          step     -- The maximum number of steps to check for a connecting wall             *
+ *                                                                                             *
+ * OUTPUT:  Was the wall successfully extended?                                                *
+ *                                                                                             *
+ *                                                                                             *
+ * HISTORY:                                                                                    *
+ *   04/29/2020 pchote : Created for the "Modern Wall Building" mod.                           *
+ *=============================================================================================*/
+bool HouseClass::Extend_Wall(OverlayTypeClass const& wall, HousesType house, CELL cell, DirType dir, int step)
+{
+	// Step in the requested direction and abort if it is outside the map
+	CELL adjacent = Adjacent_Cell(cell, dir);
+	if (!Map.In_Radar(adjacent))
+		return false;
+
+	// Check whether the cell contains a connectable wall
+	OverlayType overlay = Map[adjacent].Overlay;
+	if (overlay == wall.Type)
+		return true;
+
+	// Cell is blocked by something else
+	if (!Map[adjacent].Is_Generally_Clear())
+		return false;
+
+	// Cell does not contain a connectable wall. Does the next?
+	if (step > 1 && Extend_Wall(wall, house, adjacent, dir, step - 1))
+	{
+		// The next cell does indeed have a wall
+		// Place our new connector and tell the caller that there is now a new connectable wall
+		if (wall.Create_And_Place(adjacent, house))
+		{
+			// Set the owner so players can sell line-built walls
+			// For some reason Create_And_Place does not do this for us
+			Map[adjacent].Owner = house;
+			return true;
+		}
+
+		return true;
+	}
+
+	return false;
 }
 
 
@@ -4733,7 +4820,11 @@ void HouseClass::Sell_Wall(CELL cell)
 						Sound_Effect(VOC_CASHTURN);
 					}
 
-					Refund_Money(btype->Cost_Of()/2);
+					/*
+					** Disable refunds on walls to prevent cash exploits from line-built (free) walls.
+					** pchote - "Modern Wall Building" mod.
+					**/
+					// Refund_Money(btype->Cost_Of()/2);
 					Map[cell].Overlay = OVERLAY_NONE;
 					Map[cell].OverlayData = 0;
 					Map[cell].Owner = HOUSE_NONE;

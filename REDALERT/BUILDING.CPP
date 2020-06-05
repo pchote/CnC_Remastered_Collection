@@ -1079,6 +1079,10 @@ bool BuildingClass::Unlimbo(COORDINATE coord, DirType dir)
 	*/
 	if (Class->IsWall) {
 		if (Can_Enter_Cell(Coord_Cell(coord), FACING_NONE) == MOVE_OK) {
+			/*
+			** Building to Overlay mapping has been extracted to its own helper method.
+			** pchote - "Modern Wall Building" mod.
+			**
 			OverlayType otype = OVERLAY_NONE;
 			switch (Class->Type) {
 				case STRUCT_SANDBAG_WALL:
@@ -1110,6 +1114,8 @@ bool BuildingClass::Unlimbo(COORDINATE coord, DirType dir)
 					break;
 
 			}
+			*/
+			OverlayType otype = Class->Overlay_Type();
 			if (otype != OVERLAY_NONE) {
 				ObjectClass * o = OverlayTypeClass::As_Reference(otype).Create_One_Of(House);
 				if (o && o->Unlimbo(coord)) {
