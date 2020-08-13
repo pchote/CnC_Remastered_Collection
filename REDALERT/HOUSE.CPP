@@ -926,7 +926,7 @@ void HouseClass::AI(void)
 	**	production and team creation as well. This is also true if the IQ is high enough to
 	**	being base building.
 	*/
-	if (IsBaseBuilding || IQ >= Rule.IQProduction) {
+	if (!IsHuman && (IsBaseBuilding || IQ >= Rule.IQProduction)) {
 		IsBaseBuilding = true;
 		IsStarted = true;
 		IsAlerted = true;
@@ -962,6 +962,9 @@ void HouseClass::AI(void)
 	if (IsToDie && BorrowedTime == 0) {
 		IsToDie = false;
 		Blowup_All();
+		if (Session.Type == GAME_GLYPHX_MULTIPLAYER) {
+			MPlayer_Defeated();
+		}
 	}
 
 	/*
@@ -1130,6 +1133,7 @@ void HouseClass::AI(void)
 			unit->Mark(MARK_CHANGE);
 		} else {
 			CELL cell = As_Cell(FlagLocation);
+			Map[cell].Flag_Update();
 			Map[cell].Redraw_Objects();
 		}
 	}
@@ -1155,7 +1159,7 @@ void HouseClass::AI(void)
 	}
 
 #ifdef FIXIT_VERSION_3			//	For endgame auto-sonar pulse.
-	if( Scen.AutoSonarTimer == 0 )
+	if( (Session.Type != GAME_NORMAL || !IsHuman) && Scen.AutoSonarTimer == 0 )
 	{
 		//	If house has nothing but subs left, do an automatic sonar pulse to reveal them.
 		if( VQuantity[ VESSEL_SS ] > 0 )		//	Includes count of VESSEL_MISSILESUBs. ajw
@@ -1822,13 +1826,23 @@ void HouseClass::Attacked(BuildingClass* source)
 {
 	assert(Houses.ID(this) == ID);
 
+	bool expired = SpeakAttackDelay == 0;
+	bool spoke = false;
+
 #ifdef FIXIT_BASE_ANNOUNCE
-	if (SpeakAttackDelay == 0 && ((Session.Type == GAME_NORMAL && IsPlayerControl) || PlayerPtr->Class->House == Class->House)) {
+	// if (SpeakAttackDelay == 0 && ((Session.Type == GAME_NORMAL && IsPlayerControl) || PlayerPtr->Class->House == Class->House)) {
+	if (expired && ((Session.Type == GAME_NORMAL && IsPlayerControl) || PlayerPtr->Class->House == Class->House)) {
 #else
-	if (SpeakAttackDelay == 0 && PlayerPtr->Class->House == Class->House) {
+	// if (SpeakAttackDelay == 0 && PlayerPtr->Class->House == Class->House) {
+	if (expired && PlayerPtr->Class->House == Class->House) {
 #endif
 		Speak(VOX_BASE_UNDER_ATTACK, NULL, source ? source->Center_Coord() : 0);
-		SpeakAttackDelay = Options.Normalize_Delay(TICKS_PER_MINUTE * Rule.SpeakDelay);
+		spoke = true;
+
+		// MBL 06.13.2020 - Timing change from 2 minute cooldown, per https://jaas.ea.com/browse/TDRA-6784
+		// SpeakAttackDelay = Options.Normalize_Delay(TICKS_PER_MINUTE * Rule.SpeakDelay); // 2 minutes
+		// SpeakAttackDelay = Options.Normalize_Delay(TICKS_PER_MINUTE/2); // 30 seconds as requested
+		SpeakAttackDelay = Options.Normalize_Delay( (TICKS_PER_MINUTE/2)+(TICKS_PER_SECOND*5) ); // Tweaked for accuracy
 
 		/*
 		**	If there is a trigger event associated with being attacked, process it
@@ -1836,6 +1850,22 @@ void HouseClass::Attacked(BuildingClass* source)
 		*/
 		for (int index = 0; index < HouseTriggers[Class->House].Count(); index++) {
 			HouseTriggers[Class->House][index]->Spring(TEVENT_ATTACKED);
+		}
+	}
+
+	// MBL 07.07.2020 - CNC Patch 3, fix for not working for all players in MP, per https://jaas.ea.com/browse/TDRA-7249
+	// Separated to here as did not want to change any logic around the HouseTriggers[] Spring events
+	//
+	if (expired == true && spoke == false) 
+	{
+		if (Session.Type != GAME_NORMAL) // Multiplayer
+		{
+			Speak(VOX_BASE_UNDER_ATTACK, this);
+			spoke = true;
+	
+			// SpeakAttackDelay = Options.Normalize_Delay(TICKS_PER_MINUTE * Rule.SpeakDelay); // 2 minutes
+			// SpeakAttackDelay = Options.Normalize_Delay(TICKS_PER_MINUTE/2); // 30 seconds as requested
+			SpeakAttackDelay = Options.Normalize_Delay( (TICKS_PER_MINUTE/2)+(TICKS_PER_SECOND*5) ); // Tweaked for accuracy
 		}
 	}
 }
@@ -3844,6 +3874,13 @@ void HouseClass::MPlayer_Defeated(void)
 	}
 
 	/*
+	**	Remove any one-time superweapons the player might have.
+	*/
+	for (i = SPC_FIRST; i < SPC_COUNT; i++) {
+		SuperWeapon[i].Remove(true);
+	}
+
+	/*
 	**	If this is me:
 	**	- Set MPlayerObiWan, so I can only send messages to all players, and
 	**	  not just one (so I can't be obnoxiously omnipotent)
@@ -3852,7 +3889,6 @@ void HouseClass::MPlayer_Defeated(void)
 	*/
 	if (PlayerPtr == this) {
 		Session.ObiWan = 1;
-		Debug_Unshroud = true;
 		HidPage.Clear();
 		Map.Flag_To_Redraw(true);
 
@@ -4009,11 +4045,6 @@ void HouseClass::MPlayer_Defeated(void)
 #endif	// MPATH
 
 	}
-
-	/*
-	**	Be sure our messages get displayed, even if we're about to exit.
-	*/
-	Map.Render();
 }
 
 
@@ -4190,7 +4221,14 @@ void HouseClass::Blowup_All(void)
 			*/
 			count = 0;
 			while (::Units.Ptr(i)==uptr && uptr->Strength) {
-				damage = uptr->Strength;
+
+				// MBL 06.22.2020 RA: Not all aircraft die in this case; See https://jaas.ea.com/browse/TDRA-6840
+				// Likely due to damage biasing based on RA factions and/or difficulty settings
+				// Applying this to units (vehicles), ships, buildings, and infantry, too
+				//
+				// damage = uptr->Strength; // Original
+				damage = 0x7fff; // Copied from TD
+
 				uptr->Take_Damage(damage, 0, WARHEAD_HE, NULL, true);
 				count++;
 				if (count > 5 && uptr->IsActive) {
@@ -4209,7 +4247,13 @@ void HouseClass::Blowup_All(void)
 		if (::Aircraft.Ptr(i)->House == this && !::Aircraft.Ptr(i)->IsInLimbo) {
 			AircraftClass * aptr = ::Aircraft.Ptr(i);
 
-			damage = aptr->Strength;
+			// MBL 06.22.2020 RA: Not all aircraft die in this case; See https://jaas.ea.com/browse/TDRA-6840
+			// Likely due to damage biasing based on RA factions and/or difficulty settings
+			// Applying this to units (vehicles), ships, buildings, and infantry, too
+			//
+			// damage = aptr->Strength; // Original
+			damage = 0x7fff; // Copied from TD
+
 			aptr->Take_Damage(damage, 0, WARHEAD_HE, NULL, true);
 			if (!aptr->IsActive) {
 				i--;
@@ -4224,7 +4268,13 @@ void HouseClass::Blowup_All(void)
 		if (::Vessels.Ptr(i)->House == this && !::Vessels.Ptr(i)->IsInLimbo) {
 			VesselClass * vptr = ::Vessels.Ptr(i);
 
-			damage = vptr->Strength;
+			// MBL 06.22.2020 RA: Not all aircraft die in this case; See https://jaas.ea.com/browse/TDRA-6840
+			// Likely due to damage biasing based on RA factions and/or difficulty settings
+			// Applying this to units (vehicles), ships, buildings, and infantry, too
+			//
+			// damage = vptr->Strength; // Original
+			damage = 0x7fff; // Copied from TD 
+
 			vptr->Take_Damage(damage, 0, WARHEAD_HE, NULL, true);
 			if (!vptr->IsActive) {
 				i--;
@@ -4242,7 +4292,14 @@ void HouseClass::Blowup_All(void)
 
 			count = 0;
 			while (Buildings.Ptr(i)==bptr && bptr->Strength) {
-				damage = bptr->Strength;
+
+				// MBL 06.22.2020 RA: Not all aircraft die in this case; See https://jaas.ea.com/browse/TDRA-6840
+				// Likely due to damage biasing based on RA factions and/or difficulty settings
+				// Applying this to units (vehicles), ships, buildings, and infantry, too
+				//
+				// damage = bptr->Strength; // Original
+				damage = 0x7fff; // Copied from TD 
+
 				bptr->Take_Damage(damage, 0, WARHEAD_HE, NULL, true);
 				count++;
 				if (count > 5) {
@@ -4265,7 +4322,14 @@ void HouseClass::Blowup_All(void)
 
 			count = 0;
 			while (Infantry.Ptr(i)==iptr && iptr->Strength) {
-				damage = iptr->Strength;
+
+				// MBL 06.22.2020 RA: Not all aircraft die in this case; See https://jaas.ea.com/browse/TDRA-6840
+				// Likely due to damage biasing based on RA factions and/or difficulty settings
+				// Applying this to units (vehicles), ships, buildings, and infantry, too
+				//
+				// damage = iptr->Strength; // Original
+				damage = 0x7fff; // Copied from TD 
+
 				warhead = Random_Pick(WARHEAD_SA, WARHEAD_FIRE);
 				iptr->Take_Damage(damage, 0, warhead, NULL, true);
 
@@ -4505,10 +4569,14 @@ void HouseClass::Sell_Wall(CELL cell)
 					Map[cell].OverlayData = 0;
 					Map[cell].Owner = HOUSE_NONE;
 					Map[cell].Wall_Update();
-					Map[cell].Adjacent_Cell(FACING_N).Wall_Update();
-					Map[cell].Adjacent_Cell(FACING_W).Wall_Update();
-					Map[cell].Adjacent_Cell(FACING_S).Wall_Update();
-					Map[cell].Adjacent_Cell(FACING_E).Wall_Update();
+					CellClass * ncell = Map[cell].Adjacent_Cell(FACING_N);
+					if (ncell) ncell->Wall_Update();
+					CellClass * wcell = Map[cell].Adjacent_Cell(FACING_W);
+					if (wcell) wcell->Wall_Update();
+					CellClass * scell = Map[cell].Adjacent_Cell(FACING_S);
+					if (scell) scell->Wall_Update();
+					CellClass * ecell = Map[cell].Adjacent_Cell(FACING_E);
+					if (ecell) ecell->Wall_Update();
 					Map[cell].Recalc_Attributes();
 					Map[cell].Redraw_Objects();
 					Map.Radar_Pixel(cell);
@@ -8104,16 +8172,25 @@ void HouseClass::Check_Pertinent_Structures(void)
 		return;
 	}
 
+	// MBL 07.15.2020 - Prevention of recent issue with constant "player defeated logic" and message to client spamming
+	// Per https://jaas.ea.com/browse/TDRA-7433
+	//
+	if (IsDefeated) {
+		return;
+	}
+
 	bool any_good_buildings = false;
 	
 	for (int index = 0; index < Buildings.Count(); index++) {
 		BuildingClass *b = Buildings.Ptr(index);
 
 		if (b && b->IsActive && b->House == this) {
-			if (!b->Class->IsWall) {
-				if (!b->IsInLimbo && b->Strength > 0) {
-					any_good_buildings = true;
-					break;
+			if (!b->Class->IsWall && *b != STRUCT_APMINE && *b != STRUCT_AVMINE) {
+				if (!Special.ModernBalance || (*b != STRUCT_SHIP_YARD && *b != STRUCT_FAKE_YARD && *b != STRUCT_SUB_PEN && *b != STRUCT_FAKE_PEN)) {
+					if (!b->IsInLimbo && b->Strength > 0) {
+						any_good_buildings = true;
+						break;
+					}
 				}
 			}
 		}
